@@ -1,8 +1,8 @@
 import numpy as np
 import scipy.sparse.linalg as ssl
-import util
 from collections import namedtuple
-import nn
+
+from . import nn, util
 
 
 def adagrad(grad_func, x0, learning_rate, eps=1e-8):

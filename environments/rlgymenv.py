@@ -37,12 +37,6 @@ class RLGymSim(policyopt.Simulation):
 
     def draw(self, track_body_name='torso'):
         self.env.render()
-        if track_body_name is not None and track_body_name in self.env.model.body_names:
-            self.env.viewer.cam.trackbodyid = self.env.model.body_names.index(track_body_name)
-
-    def __del__(self):
-        if self.env.viewer:
-            self.env.viewer.finish()
 
     def reset(self):
         self.curr_obs = self.env.reset()
@@ -51,7 +45,7 @@ class RLGymSim(policyopt.Simulation):
 def _convert_space(space):
     '''Converts a rl-gym space to our own space representation'''
     if isinstance(space, spaces.Box):
-        assert space.low.ndim == 1 and space.low.shape >= 1
+        assert space.low.ndim == 1 and space.low.shape[0] >= 1
         return policyopt.ContinuousSpace(dim=space.low.shape[0])
     elif isinstance(space, spaces.Discrete):
         return policyopt.FiniteSpace(size=space.n)
@@ -60,7 +54,7 @@ def _convert_space(space):
 
 class RLGymMDP(policyopt.MDP):
     def __init__(self, env_name):
-        print 'Gym version:', gym.version.VERSION
+        print('Gym version:', gym.version.VERSION)
         self.env_name = env_name
 
         tmpsim = self.new_sim()

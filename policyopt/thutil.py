@@ -1,7 +1,8 @@
 import numpy as np
 import theano
 from theano import tensor
-import util
+
+from . import util
 
 def flatcat(arrays):
     '''

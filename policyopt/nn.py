@@ -7,10 +7,11 @@ import numpy as np
 import os
 import os.path
 import tables, warnings; warnings.filterwarnings('ignore', category=tables.NaturalNameWarning)
-import util
 
 import theano
 from theano import tensor
+
+from . import util
 
 # Global variable scoping utility, modeled after Tensorflow
 _curr_active_scope = None
@@ -47,8 +48,8 @@ class variable_scope(object):
         _curr_active_scope = self.parent
 
     def get_child_variables(self, trainable_only):
-        vs = [v for v, trainable in self.vars.itervalues() if (not trainable_only or trainable)]
-        for c in self.children.itervalues():
+        vs = [v for v, trainable in self.vars.values() if (not trainable_only or trainable)]
+        for c in self.children.values():
             vs += c.get_child_variables(trainable_only)
         return vs
 

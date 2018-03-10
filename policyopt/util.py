@@ -171,4 +171,4 @@ def loadmat(filename):
         return d
 
     data = sio.loadmat(filename, struct_as_record=False, squeeze_me=True, mat_dtype=True)
-    return {k: todict(v) for k, v in data.iteritems()}
+    return {k: todict(v) for k, v in data.items()}

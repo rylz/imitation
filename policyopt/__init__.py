@@ -149,7 +149,7 @@ class TrajBatch(object):
 
     @classmethod
     def LoadH5(cls, dset, obsfeat_fn):
-        return cls.FromTrajs([Trajectory.LoadH5(v, obsfeat_fn) for k, v in dset.iteritems()])
+        return cls.FromTrajs([Trajectory.LoadH5(v, obsfeat_fn) for k, v in dset.items()])
 
 
 # MDP stuff
