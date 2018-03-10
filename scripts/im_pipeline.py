@@ -63,7 +63,7 @@ def runpbs(cmd_templates, outputfilenames, argdicts, jobname, queue, nodes, ppn,
     script = create_pbs_script(cmds, outputfiles, jobname, queue, nodes, ppn)
     print(script)
     with tempfile.NamedTemporaryFile(suffix='.sh') as f:
-        f.write(script)
+        f.write(script.encode('utf8'))
         f.flush()
 
         if job_range is not None:
@@ -74,7 +74,7 @@ def runpbs(cmd_templates, outputfilenames, argdicts, jobname, queue, nodes, ppn,
 
         print('Running command:', cmd)
         print('ok ({} jobs)? y/n'.format(num_cmds))
-        if raw_input() == 'y':
+        if input() == 'y':
             # Write a copy of the script
             if qsub_script_copy is not None:
                 assert not os.path.exists(qsub_script_copy)
@@ -185,7 +185,7 @@ def eval_snapshot(env_name, checkptfile, snapshot_idx, num_trajs, deterministic)
     return returns, lengths
 
 
-def phase0_sampletrajs(spec, specfilename):
+def phase0_sampletrajs(spec, specfilename, alg, task):
     util.header('=== Phase 0: Sampling trajs from expert policies ===')
 
     num_trajs = spec['training']['full_dataset_num_trajs']
@@ -195,10 +195,14 @@ def phase0_sampletrajs(spec, specfilename):
     taskname2outfile = gen_taskname2outfile(spec, assert_not_exists=True)
 
     # Sample trajs for each task
-    for task in spec['tasks']:
+    for t in spec['tasks']:
+        if t['name'] != task:
+            continue
+
+        print(f'Sampling for task {task}')
         # Execute the policy
         trajbatch, policy, _ = exec_saved_policy(
-            task['env'], task['policy'], num_trajs,
+            t['env'], t['policy'], num_trajs,
             deterministic=spec['training']['deterministic_expert'],
             max_traj_len=None)
 
@@ -213,7 +217,7 @@ def phase0_sampletrajs(spec, specfilename):
         print(f'ent: {ent}')
 
         # Save the trajs to a file
-        with h5py.File(taskname2outfile[task['name']], 'w') as f:
+        with h5py.File(taskname2outfile[t['name']], 'w') as f:
             def write(dsetname, a):
                 f.create_dataset(dsetname, data=a, compression='gzip', compression_opts=9)
             # Right-padded trajectory data
@@ -225,10 +229,10 @@ def phase0_sampletrajs(spec, specfilename):
             # # Also save args to this script
             # argstr = json.dumps(vars(args), separators=(',', ':'), indent=2)
             # f.attrs['args'] = argstr
-        util.header('Wrote {}'.format(taskname2outfile[task['name']]))
+        util.header('Wrote {}'.format(taskname2outfile[t['name']]))
 
 
-def phase1_train(spec, specfilename):
+def phase1_train(spec, specfilename, alg, task):
     util.header('=== Phase 1: training ===')
 
     # Generate array job that trains all algorithms
@@ -243,32 +247,31 @@ def phase1_train(spec, specfilename):
     assert not os.listdir(checkptdir), 'Checkpoint directory {} is not empty!'.format(checkptdir)
 
     # Assemble the commands to run on the cluster
-    cmd_templates, outputfilenames, argdicts = [], [], []
-    for alg in spec['training']['algorithms']:
-        for task in spec['tasks']:
+    for t in spec['tasks']:
+        if t['name'] != task:
+            continue
+
+        for a in spec['training']['algorithms']:
+            if a['name'] != alg:
+                continue
+
+            print(f'Training {task} using {alg}')
             for num_trajs in spec['training']['dataset_num_trajs']:
                 assert num_trajs <= spec['training']['full_dataset_num_trajs']
                 for run in range(spec['training']['runs']):
                     # A string identifier. Used in filenames for this run
-                    strid = 'alg={},task={},num_trajs={},run={}'.format(alg['name'], task['name'], num_trajs, run)
-                    cmd_templates.append(alg['cmd'].replace('\n', ' ').strip())
-                    outputfilenames.append(strid + '.txt')
-                    argdicts.append({
-                        'env': task['env'],
-                        'dataset': taskname2dset[task['name']],
+                    strid = f'alg={alg},task={task},num_trajs={num_trajs},run={run}'
+                    outputfilename = strid + '.txt'
+                    argdict = {
+                        'env': t['env'],
+                        'dataset': taskname2dset[t['name']],
                         'num_trajs': num_trajs,
-                        'cuts_off_on_success': int(task['cuts_off_on_success']),
-                        'data_subsamp_freq': task['data_subsamp_freq'],
+                        'cuts_off_on_success': int(t['cuts_off_on_success']),
+                        'data_subsamp_freq': t['data_subsamp_freq'],
                         'out': os.path.join(checkptdir, strid + '.h5'),
-                    })
-
-    pbsopts = spec['options']['pbs']
-    runpbs(
-        cmd_templates, outputfilenames, argdicts,
-        jobname=pbsopts['jobname'], queue=pbsopts['queue'], nodes=1, ppn=pbsopts['ppn'],
-        job_range=pbsopts['range'] if 'range' in pbsopts else None,
-        qsub_script_copy=os.path.join(checkptdir, 'qsub_script.sh')
-    )
+                    }
+                    cmd = a['cmd'].replace('\n', ' ').strip().format(argdict)
+                    subprocess.run(cmd, shell=True, stdout=outputfilename)
 
     # Copy the pipeline yaml file to the output dir too
     shutil.copyfile(specfilename, os.path.join(checkptdir, 'pipeline.yaml'))
@@ -279,7 +282,7 @@ def phase1_train(spec, specfilename):
     with open(os.path.join(checkptdir, 'git_hash.txt'), 'w') as f:
         f.write(git_hash + '\n')
 
-def phase2_eval(spec, specfilename):
+def phase2_eval(spec, specfilename, alg, task):
     util.header('=== Phase 2: evaluating trained models ===')
     import pandas as pd
 
@@ -298,19 +301,26 @@ def phase2_eval(spec, specfilename):
     # First, pre-determine which evaluations we have to do
     evals_to_do = []
     nonexistent_checkptfiles = []
-    for task in spec['tasks']:
-        # See how well the algorithms did...
-        for alg in spec['training']['algorithms']:
+    for t in spec['tasks']:
+        if t['name'] != task:
+            continue
+
+        # See how well the algorithm did...
+        for a in spec['training']['algorithms']:
+            if a['name'] != alg:
+                continue
+
+            print(f'Evaluating {task} using {alg}')
             # ...on various dataset sizes
             for num_trajs in spec['training']['dataset_num_trajs']:
                 # for each rerun, for mean / error bars later
                 for run in range(spec['training']['runs']):
                     # Make sure the checkpoint file exists (maybe PBS dropped some jobs)
-                    strid = 'alg={},task={},num_trajs={},run={}'.format(alg['name'], task['name'], num_trajs, run)
+                    strid = f'alg={alg},task={task},num_trajs={num_trajs},run={run}'
                     checkptfile = os.path.join(checkptdir, strid + '.h5')
                     if not os.path.exists(checkptfile):
                         nonexistent_checkptfiles.append(checkptfile)
-                    evals_to_do.append((task, alg, num_trajs, run, checkptfile))
+                    evals_to_do.append((t, a, num_trajs, run, checkptfile))
 
     if nonexistent_checkptfiles:
         print('Cannot find checkpoint files:\n', '\n'.join(nonexistent_checkptfiles))
@@ -318,12 +328,12 @@ def phase2_eval(spec, specfilename):
 
     # Walk through all saved checkpoints
     collected_results = []
-    for i_eval, (task, alg, num_trajs, run, checkptfile) in enumerate(evals_to_do):
+    for i_eval, (t, a, num_trajs, run, checkptfile) in enumerate(evals_to_do):
         util.header('Evaluating run {}/{}: alg={},task={},num_trajs={},run={}'.format(
-            i_eval+1, len(evals_to_do), alg['name'], task['name'], num_trajs, run))
+            i_eval+1, len(evals_to_do), alg, task, num_trajs, run))
 
         # Load the task's traj dataset to see how well the expert does
-        with h5py.File(taskname2dset[task['name']], 'r') as trajf:
+        with h5py.File(taskname2dset[task], 'r') as trajf:
             # Expert's true return and traj lengths
             ex_traj_returns = trajf['r_B_T'][...].sum(axis=1)
             ex_traj_lengths = trajf['len_B'][...]
@@ -334,21 +344,21 @@ def phase2_eval(spec, specfilename):
             log_df.set_index('iter', inplace=True)
 
             # Evaluate true return for the learned policy
-            if alg['name'] == 'bclone':
+            if alg == 'bclone':
                 # Pick the policy with the best validation accuracy
                 best_snapshot_idx = log_df['valacc'].argmax()
                 alg_traj_returns, alg_traj_lengths = eval_snapshot(
-                    task['env'], checkptfile, best_snapshot_idx,
+                    t['env'], checkptfile, best_snapshot_idx,
                     spec['options']['eval_num_trajs'], deterministic=True)
 
-            elif any(alg['name'].startswith(s) for s in ('ga', 'fem', 'simplex')):
+            elif any(alg.startswith(s) for s in ('ga', 'fem', 'simplex')):
                 # Evaluate the last saved snapshot
                 snapshot_names = f.root.snapshots._v_children.keys()
                 assert all(name.startswith('iter') for name in snapshot_names)
                 snapshot_inds = sorted([int(name[len('iter'):]) for name in snapshot_names])
                 best_snapshot_idx = snapshot_inds[-1]
                 alg_traj_returns, alg_traj_lengths = eval_snapshot(
-                    task['env'], checkptfile, best_snapshot_idx,
+                    t['env'], checkptfile, best_snapshot_idx,
                     spec['options']['eval_num_trajs'], deterministic=True)
 
             else:
@@ -356,8 +366,8 @@ def phase2_eval(spec, specfilename):
 
             collected_results.append({
                 # Trial info
-                'alg': alg['name'],
-                'task': task['name'],
+                'alg': alg,
+                'task': task,
                 'num_trajs': num_trajs,
                 'run': run,
                 # Expert performance
@@ -373,24 +383,41 @@ def phase2_eval(spec, specfilename):
         outf['results'] = collected_results
 
 
+PHASES = {
+    '0_sampletrajs': phase0_sampletrajs,
+    '1_train': phase1_train,
+    '2_eval': phase2_eval,
+}
+
+# NB: this duplicates choices present in the pipeline yaml files
+ALGORITHMS = [
+    'bclone',
+    'ga',
+    'fem',
+    'simplex',
+]
+
+# NB: this duplicates choices present in the pipeline yaml files
+TASKS = [
+    'cartpole',
+    'mountaincar',
+    'acrobot',
+]
+
 def main():
     np.set_printoptions(suppress=True, precision=5, linewidth=1000)
 
-    phases = {
-        '0_sampletrajs': phase0_sampletrajs,
-        '1_train': phase1_train,
-        '2_eval': phase2_eval,
-    }
-
     parser = argparse.ArgumentParser()
-    parser.add_argument('spec', type=str)
-    parser.add_argument('phase', choices=sorted(phases.keys()))
+    parser.add_argument('--spec', type=str)
+    parser.add_argument('--phase', choices=sorted(PHASES.keys()), required=True)
+    parser.add_argument('--alg', choices=sorted(ALGORITHMS), required=True)
+    parser.add_argument('--task', choices=sorted(TASKS), required=True)
     args = parser.parse_args()
 
     with open(args.spec, 'r') as f:
         spec = yaml.load(f)
 
-    phases[args.phase](spec, args.spec)
+    PHASES[args.phase](spec, args.spec, args.alg, args.task)
 
 if __name__ == '__main__':
     main()
